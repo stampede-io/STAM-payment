@@ -1,0 +1,27 @@
+spring:
+  application:
+    name: payment
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:payment}
+    username: ${DB_USERNAME:payment}
+    password: ${DB_PASSWORD:payment}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+server:
+  port: ${SERVER_PORT:8083}
+
+payment:
+  failure-rate: ${PAYMENT_FAILURE_RATE:0.0}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
