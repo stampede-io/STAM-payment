@@ -1,2 +1,6 @@
+eureka:
+  client:
+    enabled: false
+
 payment:
   failure-rate: 0.0
