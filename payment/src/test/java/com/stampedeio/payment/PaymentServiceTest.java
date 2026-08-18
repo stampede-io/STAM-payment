@@ -152,7 +152,6 @@ class PaymentServiceTest {
         Payment p = new Payment(cid, 1000L, "USD");
         p.markAuthorized("pi_web");
         when(paymentRepository.findByPspRef("pi_web")).thenReturn(Optional.of(p));
-        when(paymentGateway.name()).thenReturn("stripe");
 
         svc().applyWebhookOutcome("pi_web", true, null);
         verify(kafkaTemplate, never()).send(eq("payments.events"), any(), any());
