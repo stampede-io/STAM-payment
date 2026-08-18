@@ -147,6 +147,57 @@ class PaymentServiceTest {
     }
 
     @Test
+    void refund_forwardsCorrelationIdAsStripeIdempotencyKey() {
+        UUID cid = UUID.randomUUID();
+        when(idempotencyKeyRepository.findById(cid)).thenReturn(Optional.empty());
+        when(paymentGateway.refund(any(RefundRequest.class))).thenReturn(RefundResult.ok("re_x"));
+        when(paymentGateway.name()).thenReturn("stripe");
+
+        svc().refundPayment(cid, UUID.randomUUID(),
+                Map.of("pspRef", "pi_test_123", "amountCents", 0L));
+
+        ArgumentCaptor<RefundRequest> reqCap = ArgumentCaptor.forClass(RefundRequest.class);
+        verify(paymentGateway).refund(reqCap.capture());
+        assertThat(reqCap.getValue().idempotencyKey()).isEqualTo(cid.toString());
+    }
+
+    @Test
+    void refund_lookupPspRefViaOriginalCorrelationId_whenNotSuppliedDirectly() {
+        UUID refundCid = UUID.randomUUID();
+        UUID chargeCid = UUID.randomUUID();
+        Payment original = paymentAuthorized(chargeCid, "pi_original", 1000L, "USD");
+
+        when(idempotencyKeyRepository.findById(refundCid)).thenReturn(Optional.empty());
+        when(paymentRepository.findById(chargeCid)).thenReturn(Optional.of(original));
+        when(paymentRepository.findByPspRef("pi_original")).thenReturn(Optional.of(original));
+        when(paymentGateway.refund(any(RefundRequest.class))).thenReturn(RefundResult.ok("re_x"));
+        when(paymentGateway.name()).thenReturn("stripe");
+
+        svc().refundPayment(refundCid, UUID.randomUUID(),
+                Map.of("originalCorrelationId", chargeCid.toString(), "amountCents", 1000L));
+
+        ArgumentCaptor<RefundRequest> reqCap = ArgumentCaptor.forClass(RefundRequest.class);
+        verify(paymentGateway).refund(reqCap.capture());
+        assertThat(reqCap.getValue().pspRef()).isEqualTo("pi_original");
+        assertThat(original.getStatus()).isEqualTo("REFUNDED");
+    }
+
+    @Test
+    void refund_failure_emitsRefundFailed() {
+        UUID cid = UUID.randomUUID();
+        when(idempotencyKeyRepository.findById(cid)).thenReturn(Optional.empty());
+        when(paymentGateway.refund(any(RefundRequest.class)))
+                .thenReturn(RefundResult.failed("charge_already_refunded"));
+        when(paymentGateway.name()).thenReturn("stripe");
+
+        svc().refundPayment(cid, UUID.randomUUID(),
+                Map.of("pspRef", "pi_test_123", "amountCents", 500L));
+
+        verify(kafkaTemplate).send(eq("payments.events"), any(), eventCaptor.capture());
+        assertThat(((EventEnvelope) eventCaptor.getValue()).eventType()).isEqualTo("RefundFailed");
+    }
+
+    @Test
     void webhook_authorized_isIdempotent_secondCallDoesNotEmit() {
         UUID cid = UUID.randomUUID();
         Payment p = new Payment(cid, 1000L, "USD");
