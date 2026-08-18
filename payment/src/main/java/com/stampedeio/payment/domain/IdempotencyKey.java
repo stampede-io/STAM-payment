@@ -22,6 +22,9 @@ public class IdempotencyKey {
     @Column(nullable = false, length = 40)
     private String outcome;
 
+    @Column(name = "psp_ref", length = 120)
+    private String pspRef;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt = Instant.now();
 
@@ -29,9 +32,14 @@ public class IdempotencyKey {
     }
 
     public IdempotencyKey(UUID correlationId, String commandType, String outcome) {
+        this(correlationId, commandType, outcome, null);
+    }
+
+    public IdempotencyKey(UUID correlationId, String commandType, String outcome, String pspRef) {
         this.correlationId = correlationId;
         this.commandType = commandType;
         this.outcome = outcome;
+        this.pspRef = pspRef;
     }
 
     public UUID getCorrelationId() {
@@ -44,6 +52,10 @@ public class IdempotencyKey {
 
     public String getOutcome() {
         return outcome;
+    }
+
+    public String getPspRef() {
+        return pspRef;
     }
 
     public Instant getCreatedAt() {
