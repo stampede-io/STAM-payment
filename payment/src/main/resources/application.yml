@@ -20,7 +20,13 @@ server:
   port: ${SERVER_PORT:8083}
 
 payment:
+  # gateway: mock (default) | stripe
+  gateway: ${PAYMENT_GATEWAY:mock}
   failure-rate: ${PAYMENT_FAILURE_RATE:0.0}
+
+stripe:
+  api-key: ${STRIPE_API_KEY:}
+  webhook-secret: ${STRIPE_WEBHOOK_SECRET:}
 
 eureka:
   client:
