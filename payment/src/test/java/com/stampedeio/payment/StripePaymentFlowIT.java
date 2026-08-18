@@ -142,8 +142,9 @@ class StripePaymentFlowIT {
     @Test
     void webhookWithValidSignature_authorizesPendingPayment_andEmitsPaymentAuthorized() throws Exception {
         UUID cid = UUID.randomUUID();
+        UUID reservationId = UUID.randomUUID();
         String pspRef = "pi_it_" + cid;
-        Payment pending = new Payment(cid, 5000L, "USD");
+        Payment pending = new Payment(cid, reservationId, 5000L, "USD");
         pending.markRequiresAction(pspRef);
         paymentRepository.save(pending);
 
@@ -167,7 +168,8 @@ class StripePaymentFlowIT {
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
                 assertThat(receivedEvents)
                         .anyMatch(e -> "PaymentAuthorized".equals(e.get("eventType"))
-                                && cid.toString().equals(e.get("correlationId"))));
+                                && cid.toString().equals(e.get("correlationId"))
+                                && reservationId.toString().equals(e.get("aggregateId"))));
 
         assertThat(paymentRepository.findById(cid).orElseThrow().getStatus()).isEqualTo("AUTHORIZED");
     }

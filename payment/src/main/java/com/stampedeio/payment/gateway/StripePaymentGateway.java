@@ -92,7 +92,10 @@ public class StripePaymentGateway implements PaymentGateway {
         String status = intent.getStatus();
         return switch (status) {
             case "succeeded" -> AuthorizeResult.authorized(intent.getId());
-            case "requires_action", "requires_confirmation" ->
+            // "processing" is Stripe's terminal-pending state for async payment
+            // methods (ACH, SEPA, some wallets); treat as REQUIRES_ACTION so the
+            // webhook path is the one that ultimately confirms or fails it.
+            case "requires_action", "requires_confirmation", "processing", "requires_capture" ->
                     new AuthorizeResult(intent.getId(), ChargeStatus.REQUIRES_ACTION, null);
             default -> AuthorizeResult.failed(intent.getId(), status);
         };

@@ -28,7 +28,6 @@ public class PaymentService {
     private static final Logger log = LoggerFactory.getLogger(PaymentService.class);
     private static final String TOPIC_PAYMENTS_EVENTS = "payments.events";
     private static final String DEFAULT_CURRENCY = "USD";
-    private static final String DEFAULT_TEST_PAYMENT_METHOD = "pm_card_visa";
 
     private final PaymentGateway paymentGateway;
     private final PaymentRepository paymentRepository;
@@ -51,12 +50,32 @@ public class PaymentService {
         if (existing.isPresent()) {
             log.info("Duplicate AuthorizePayment correlationId={}, replaying outcome={}",
                     correlationId, existing.get().getOutcome());
-            emitOutcome(existing.get().getOutcome(), correlationId, aggregateId, replayPayload(correlationId));
-            return replayResult(correlationId);
+            Payment prior = paymentRepository.findById(correlationId).orElse(null);
+            emitOutcome(existing.get().getOutcome(), correlationId,
+                    prior != null && prior.getAggregateId() != null ? prior.getAggregateId() : aggregateId,
+                    authorizePayload(prior, existing.get(), paymentGateway.name()));
+            return authorizeResult(prior, existing.get());
         }
 
         PaymentPayload parsed = PaymentPayload.from(payload);
-        Payment payment = new Payment(correlationId, parsed.amountCents(), parsed.currency());
+        if (parsed.paymentMethodId() == null || parsed.paymentMethodId().isBlank()) {
+            String reason = "missing_payment_method";
+            Payment payment = new Payment(correlationId, aggregateId, parsed.amountCents(), parsed.currency());
+            payment.markFailed(null, reason);
+            paymentRepository.save(payment);
+            idempotencyKeyRepository.save(new IdempotencyKey(
+                    correlationId, "AuthorizePayment", "PaymentFailed", null));
+            emitOutcome("PaymentFailed", correlationId, aggregateId,
+                    Map.of(
+                            "pspRef", "",
+                            "amountCents", parsed.amountCents(),
+                            "currency", parsed.currency(),
+                            "gateway", paymentGateway.name(),
+                            "failureReason", reason));
+            return AuthorizeResult.failed(null, reason);
+        }
+
+        Payment payment = new Payment(correlationId, aggregateId, parsed.amountCents(), parsed.currency());
         payment = paymentRepository.save(payment);
 
         AuthorizeRequest req = new AuthorizeRequest(
@@ -80,13 +99,11 @@ public class PaymentService {
             outcomeEvent = "PaymentFailed";
         }
 
-        idempotencyKeyRepository.save(new IdempotencyKey(correlationId, "AuthorizePayment", outcomeEvent));
+        idempotencyKeyRepository.save(new IdempotencyKey(
+                correlationId, "AuthorizePayment", outcomeEvent, result.pspRef()));
         emitOutcome(outcomeEvent, correlationId, aggregateId,
-                Map.of(
-                        "pspRef", result.pspRef() == null ? "" : result.pspRef(),
-                        "amountCents", parsed.amountCents(),
-                        "currency", parsed.currency(),
-                        "gateway", paymentGateway.name()));
+                authorizeEventPayload(result.pspRef(), parsed.amountCents(), parsed.currency(),
+                        paymentGateway.name(), result.failureReason(), null));
         log.info("Processed AuthorizePayment correlationId={} outcome={} gateway={}",
                 correlationId, outcomeEvent, paymentGateway.name());
         return result;
@@ -98,18 +115,16 @@ public class PaymentService {
         if (existing.isPresent()) {
             log.info("Duplicate RefundPayment correlationId={}, replaying outcome={}",
                     correlationId, existing.get().getOutcome());
-            emitOutcome(existing.get().getOutcome(), correlationId, aggregateId, Map.of());
-            return RefundResult.ok(existing.get().getOutcome());
+            emitOutcome(existing.get().getOutcome(), correlationId, aggregateId,
+                    refundEventPayload(existing.get().getPspRef(), null, paymentGateway.name()));
+            return replayRefundResult(existing.get());
         }
 
         PaymentPayload parsed = PaymentPayload.from(payload);
         String pspRef = parsed.pspRef();
-        if (pspRef == null || pspRef.isBlank()) {
-            // Refund flows arriving via Kafka carry the original payment correlation-id;
-            // look up the psp_ref from our payments row.
-            Payment original = parsed.originalCorrelationId() != null
-                    ? paymentRepository.findById(parsed.originalCorrelationId()).orElse(null)
-                    : null;
+        Payment original = null;
+        if ((pspRef == null || pspRef.isBlank()) && parsed.originalCorrelationId() != null) {
+            original = paymentRepository.findById(parsed.originalCorrelationId()).orElse(null);
             if (original != null) {
                 pspRef = original.getPspRef();
             }
@@ -119,26 +134,30 @@ public class PaymentService {
         RefundResult result = paymentGateway.refund(req);
 
         String outcome = result.succeeded() ? "RefundIssued" : "RefundFailed";
-        idempotencyKeyRepository.save(new IdempotencyKey(correlationId, "RefundPayment", outcome));
+        idempotencyKeyRepository.save(new IdempotencyKey(
+                correlationId, "RefundPayment", outcome, result.refundRef()));
 
-        if (result.succeeded() && pspRef != null) {
-            paymentRepository.findByPspRef(pspRef).ifPresent(Payment::markRefunded);
+        if (result.succeeded()) {
+            if (original == null && pspRef != null) {
+                original = paymentRepository.findByPspRef(pspRef).orElse(null);
+            }
+            if (original != null) {
+                original.markRefunded();
+            }
         }
 
         emitOutcome(outcome, correlationId, aggregateId,
-                Map.of(
-                        "refundRef", result.refundRef() == null ? "" : result.refundRef(),
-                        "pspRef", pspRef == null ? "" : pspRef,
-                        "gateway", paymentGateway.name()));
+                refundEventPayload(result.refundRef(), pspRef, paymentGateway.name()));
         log.info("Processed RefundPayment correlationId={} outcome={} gateway={}",
                 correlationId, outcome, paymentGateway.name());
         return result;
     }
 
     /**
-     * Called by the Stripe webhook consumer when Stripe confirms an intent's terminal
-     * state out-of-band (e.g. async payment methods or delayed confirmation). Uses the
-     * PaymentIntent id (psp_ref) as the identity, not correlationId.
+     * Applied when Stripe confirms a PaymentIntent's terminal state out-of-band
+     * (async payment methods, delayed confirmation). Uses the PaymentIntent id
+     * as the identity and re-emits keyed on the original aggregate so booking's
+     * saga consumer, partitioned by reservation id, receives it.
      */
     @Transactional
     public void applyWebhookOutcome(String pspRef, boolean succeeded, String failureReason) {
@@ -163,15 +182,14 @@ public class PaymentService {
             outcomeEvent = "PaymentFailed";
         }
         idempotencyKeyRepository.save(new IdempotencyKey(
-                payment.getCorrelationId(), "AuthorizePayment", outcomeEvent));
-        emitOutcome(outcomeEvent, payment.getCorrelationId(), payment.getCorrelationId(),
-                Map.of(
-                        "pspRef", pspRef,
-                        "amountCents", payment.getAmountCents(),
-                        "currency", payment.getCurrency(),
-                        "gateway", paymentGateway.name(),
-                        "source", "webhook"));
-        log.info("Applied webhook outcome pspRef={} → {}", pspRef, outcomeEvent);
+                payment.getCorrelationId(), "AuthorizePayment", outcomeEvent, pspRef));
+
+        UUID emitAggregate = payment.getAggregateId() != null ? payment.getAggregateId() : payment.getCorrelationId();
+        emitOutcome(outcomeEvent, payment.getCorrelationId(), emitAggregate,
+                authorizeEventPayload(pspRef, payment.getAmountCents(), payment.getCurrency(),
+                        paymentGateway.name(), failureReason, "webhook"));
+        log.info("Applied webhook outcome pspRef={} → {} aggregateId={}",
+                pspRef, outcomeEvent, emitAggregate);
     }
 
     private void emitOutcome(String eventType, UUID correlationId, UUID aggregateId, Object payload) {
@@ -179,25 +197,46 @@ public class PaymentService {
         kafkaTemplate.send(TOPIC_PAYMENTS_EVENTS, aggregateId.toString(), envelope);
     }
 
-    private Map<String, Object> replayPayload(UUID correlationId) {
-        return paymentRepository.findById(correlationId)
-                .map(p -> Map.<String, Object>of(
-                        "pspRef", p.getPspRef() == null ? "" : p.getPspRef(),
-                        "amountCents", p.getAmountCents(),
-                        "currency", p.getCurrency()))
-                .orElse(Map.of());
+    private static Map<String, Object> authorizeEventPayload(String pspRef, long amountCents, String currency,
+                                                             String gateway, String failureReason, String source) {
+        Map<String, Object> payload = new java.util.HashMap<>();
+        payload.put("pspRef", pspRef == null ? "" : pspRef);
+        payload.put("amountCents", amountCents);
+        payload.put("currency", currency);
+        payload.put("gateway", gateway);
+        if (failureReason != null) payload.put("failureReason", failureReason);
+        if (source != null) payload.put("source", source);
+        return payload;
     }
 
-    private AuthorizeResult replayResult(UUID correlationId) {
-        Payment p = paymentRepository.findById(correlationId).orElse(null);
-        if (p == null) {
-            return new AuthorizeResult(null, ChargeStatus.FAILED, "no_payment_row");
-        }
-        return switch (p.getStatus()) {
-            case "AUTHORIZED" -> AuthorizeResult.authorized(p.getPspRef());
-            case "REQUIRES_ACTION" -> new AuthorizeResult(p.getPspRef(), ChargeStatus.REQUIRES_ACTION, null);
-            default -> AuthorizeResult.failed(p.getPspRef(), p.getFailureReason());
+    private static Map<String, Object> refundEventPayload(String refundRef, String pspRef, String gateway) {
+        return Map.of(
+                "refundRef", refundRef == null ? "" : refundRef,
+                "pspRef", pspRef == null ? "" : pspRef,
+                "gateway", gateway);
+    }
+
+    private static Map<String, Object> authorizePayload(Payment payment, IdempotencyKey key, String gateway) {
+        long amountCents = payment != null ? payment.getAmountCents() : 0L;
+        String currency = payment != null ? payment.getCurrency() : DEFAULT_CURRENCY;
+        String failureReason = payment != null ? payment.getFailureReason() : null;
+        return authorizeEventPayload(key.getPspRef(), amountCents, currency, gateway, failureReason, "replay");
+    }
+
+    private static AuthorizeResult authorizeResult(Payment payment, IdempotencyKey key) {
+        String pspRef = key.getPspRef();
+        return switch (key.getOutcome()) {
+            case "PaymentAuthorized" -> AuthorizeResult.authorized(pspRef);
+            case "PaymentRequiresAction" -> new AuthorizeResult(pspRef, ChargeStatus.REQUIRES_ACTION, null);
+            default -> AuthorizeResult.failed(pspRef, payment != null ? payment.getFailureReason() : null);
         };
+    }
+
+    private static RefundResult replayRefundResult(IdempotencyKey key) {
+        if ("RefundIssued".equals(key.getOutcome())) {
+            return RefundResult.ok(key.getPspRef());
+        }
+        return RefundResult.failed("previously_failed");
     }
 
     private record PaymentPayload(long amountCents, String currency, String paymentMethodId,
@@ -207,7 +246,7 @@ public class PaymentService {
         static PaymentPayload from(Object payload) {
             long amount = 0L;
             String currency = DEFAULT_CURRENCY;
-            String pm = DEFAULT_TEST_PAYMENT_METHOD;
+            String pm = null;
             String pspRef = null;
             UUID original = null;
             if (payload instanceof Map<?, ?> map) {

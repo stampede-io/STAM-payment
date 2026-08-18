@@ -140,7 +140,11 @@ class PaymentCommandConsumerIT {
         command.put("occurredAt", Instant.now().toString());
         command.put("correlationId", correlationId.toString());
         command.put("aggregateId", aggregateId.toString());
-        command.put("payload", Map.of("amount", 9999, "currency", "USD"));
+        command.put("payload", Map.of(
+                "amountCents", 9999,
+                "currency", "USD",
+                "paymentMethodId", "pm_card_visa",
+                "pspRef", "pi_it_seed"));
 
         kafkaTemplate.send("payments.commands", aggregateId.toString(), command)
                 .get(10, TimeUnit.SECONDS);

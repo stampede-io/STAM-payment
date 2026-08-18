@@ -23,6 +23,9 @@ public class Payment {
     @Column(name = "correlation_id")
     private UUID correlationId;
 
+    @Column(name = "aggregate_id")
+    private UUID aggregateId;
+
     @Column(name = "psp_ref", length = 120)
     private String pspRef;
 
@@ -47,8 +50,9 @@ public class Payment {
     protected Payment() {
     }
 
-    public Payment(UUID correlationId, long amountCents, String currency) {
+    public Payment(UUID correlationId, UUID aggregateId, long amountCents, String currency) {
         this.correlationId = correlationId;
+        this.aggregateId = aggregateId;
         this.amountCents = amountCents;
         this.currency = currency;
         this.status = "PENDING";
@@ -89,6 +93,10 @@ public class Payment {
 
     public UUID getCorrelationId() {
         return correlationId;
+    }
+
+    public UUID getAggregateId() {
+        return aggregateId;
     }
 
     public String getPspRef() {

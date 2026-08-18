@@ -118,7 +118,7 @@ class PaymentServiceTest {
     @Test
     void authorize_duplicateCommand_replaysWithoutCallingGateway() {
         UUID cid = UUID.randomUUID();
-        IdempotencyKey existing = new IdempotencyKey(cid, "AuthorizePayment", "PaymentAuthorized");
+        IdempotencyKey existing = new IdempotencyKey(cid, "AuthorizePayment", "PaymentAuthorized", "pi_saved");
         when(idempotencyKeyRepository.findById(cid)).thenReturn(Optional.of(existing));
         when(paymentRepository.findById(cid)).thenReturn(Optional.of(
                 paymentAuthorized(cid, "pi_saved", 9999L, "USD")));
@@ -129,6 +129,68 @@ class PaymentServiceTest {
         verify(idempotencyKeyRepository, never()).save(any());
         verify(kafkaTemplate).send(eq("payments.events"), any(), eventCaptor.capture());
         assertThat(((EventEnvelope) eventCaptor.getValue()).eventType()).isEqualTo("PaymentAuthorized");
+    }
+
+    @Test
+    void authorize_missingPaymentMethod_emitsPaymentFailed_withoutCallingGateway() {
+        UUID cid = UUID.randomUUID();
+        when(idempotencyKeyRepository.findById(cid)).thenReturn(Optional.empty());
+        when(paymentRepository.save(any(Payment.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(paymentGateway.name()).thenReturn("stripe");
+
+        AuthorizeResult result = svc().authorizePayment(cid, UUID.randomUUID(),
+                Map.of("amountCents", 500L, "currency", "USD"));
+
+        assertThat(result.status()).isEqualTo(com.stampedeio.payment.gateway.ChargeStatus.FAILED);
+        assertThat(result.failureReason()).isEqualTo("missing_payment_method");
+        verify(paymentGateway, never()).authorize(any());
+        verify(kafkaTemplate).send(eq("payments.events"), any(), eventCaptor.capture());
+        assertThat(((EventEnvelope) eventCaptor.getValue()).eventType()).isEqualTo("PaymentFailed");
+    }
+
+    @Test
+    void refund_duplicateReplay_returnsProperOutcome_forFailedOriginal() {
+        UUID cid = UUID.randomUUID();
+        IdempotencyKey existing = new IdempotencyKey(cid, "RefundPayment", "RefundFailed", null);
+        when(idempotencyKeyRepository.findById(cid)).thenReturn(Optional.of(existing));
+        when(paymentGateway.name()).thenReturn("stripe");
+
+        RefundResult result = svc().refundPayment(cid, UUID.randomUUID(), Map.of());
+
+        assertThat(result.succeeded()).isFalse();
+        verify(paymentGateway, never()).refund(any());
+    }
+
+    @Test
+    void refund_duplicateReplay_returnsOk_withStoredRefundRef_forSuccessOriginal() {
+        UUID cid = UUID.randomUUID();
+        IdempotencyKey existing = new IdempotencyKey(cid, "RefundPayment", "RefundIssued", "re_saved");
+        when(idempotencyKeyRepository.findById(cid)).thenReturn(Optional.of(existing));
+        when(paymentGateway.name()).thenReturn("stripe");
+
+        RefundResult result = svc().refundPayment(cid, UUID.randomUUID(), Map.of());
+
+        assertThat(result.succeeded()).isTrue();
+        assertThat(result.refundRef()).isEqualTo("re_saved");
+        verify(paymentGateway, never()).refund(any());
+    }
+
+    @Test
+    void webhook_emitsWithOriginalAggregateId_notCorrelationId() {
+        UUID cid = UUID.randomUUID();
+        UUID aggregateId = UUID.randomUUID();
+        Payment p = new Payment(cid, aggregateId, 1000L, "USD");
+        p.markRequiresAction("pi_wh");
+        when(paymentRepository.findByPspRef("pi_wh")).thenReturn(Optional.of(p));
+        when(paymentGateway.name()).thenReturn("stripe");
+
+        svc().applyWebhookOutcome("pi_wh", true, null);
+
+        verify(kafkaTemplate).send(eq("payments.events"), eq(aggregateId.toString()), eventCaptor.capture());
+        EventEnvelope env = (EventEnvelope) eventCaptor.getValue();
+        assertThat(env.aggregateId()).isEqualTo(aggregateId);
+        assertThat(env.correlationId()).isEqualTo(cid);
+        assertThat(env.eventType()).isEqualTo("PaymentAuthorized");
     }
 
     @Test
@@ -169,7 +231,6 @@ class PaymentServiceTest {
 
         when(idempotencyKeyRepository.findById(refundCid)).thenReturn(Optional.empty());
         when(paymentRepository.findById(chargeCid)).thenReturn(Optional.of(original));
-        when(paymentRepository.findByPspRef("pi_original")).thenReturn(Optional.of(original));
         when(paymentGateway.refund(any(RefundRequest.class))).thenReturn(RefundResult.ok("re_x"));
         when(paymentGateway.name()).thenReturn("stripe");
 
@@ -200,7 +261,7 @@ class PaymentServiceTest {
     @Test
     void webhook_authorized_isIdempotent_secondCallDoesNotEmit() {
         UUID cid = UUID.randomUUID();
-        Payment p = new Payment(cid, 1000L, "USD");
+        Payment p = new Payment(cid, UUID.randomUUID(), 1000L, "USD");
         p.markAuthorized("pi_web");
         when(paymentRepository.findByPspRef("pi_web")).thenReturn(Optional.of(p));
 
@@ -211,7 +272,7 @@ class PaymentServiceTest {
     @Test
     void webhook_pendingPayment_transitionsAndEmits() {
         UUID cid = UUID.randomUUID();
-        Payment p = new Payment(cid, 1000L, "USD");
+        Payment p = new Payment(cid, UUID.randomUUID(), 1000L, "USD");
         p.markRequiresAction("pi_web2");
         when(paymentRepository.findByPspRef("pi_web2")).thenReturn(Optional.of(p));
         when(paymentGateway.name()).thenReturn("stripe");
@@ -224,7 +285,7 @@ class PaymentServiceTest {
     }
 
     private static Payment paymentAuthorized(UUID cid, String pspRef, long amount, String currency) {
-        Payment p = new Payment(cid, amount, currency);
+        Payment p = new Payment(cid, UUID.randomUUID(), amount, currency);
         p.markAuthorized(pspRef);
         return p;
     }
