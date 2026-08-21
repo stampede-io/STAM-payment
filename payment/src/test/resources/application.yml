@@ -1,2 +1,16 @@
+spring:
+  cloud:
+    config:
+      enabled: false
+
+eureka:
+  client:
+    enabled: false
+
 payment:
+  gateway: mock
   failure-rate: 0.0
+
+stripe:
+  api-key: ""
+  webhook-secret: whsec_test_secret_for_it
