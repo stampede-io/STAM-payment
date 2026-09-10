@@ -1,0 +1,104 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit configuration for STAM-payment
+# Stripe test-mode PSP + saga command consumer. Money path - review assertively.
+language: en-US
+early_access: false
+
+reviews:
+  profile: assertive
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "Dev"
+      - "main"
+
+  path_filters:
+    - "!**/target/**"
+    - "!**/.idea/**"
+
+  path_instructions:
+    - path: "payment/src/main/java/com/stampedeio/payment/consumer/**"
+      instructions: >
+        This consumes saga commands from payments.commands (AuthorizePayment,
+        RefundPayment) and Kafka redelivers. Idempotency is enforced via the
+        idempotency_keys table. Flag as a must-fix: (1) any command
+        handler that charges, refunds, or mutates a Payment before claiming
+        an idempotency key, or that claims the key non-transactionally with
+        the side effect - a redelivery would then double-charge; (2) an
+        unknown eventType that is silently dropped without a warning log;
+        (3) any handler missing correlationId propagation into MDC.
+
+    - path: "payment/src/main/java/com/stampedeio/payment/web/StripeWebhookController.java"
+      instructions: >
+        Flag as a must-fix any code path that parses, trusts, or acts on
+        a webhook body BEFORE verifying the Stripe signature header. Signature
+        verification must come first and must return 4xx on mismatch. Webhooks
+        are replayed by Stripe, so the handler must be idempotent on
+        event id. Flag any webhook that mutates payment state without routing
+        through the same idempotency guard as the command path.
+
+    - path: "payment/src/main/java/com/stampedeio/payment/gateway/**"
+      instructions: >
+        PaymentGateway is the abstraction over StripePaymentGateway (real,
+        test mode) and MockPaymentGateway (chaos knob via
+        PAYMENT_FAILURE_RATE, used to produce deterministic compensation
+        demos). Flag: (1) any Stripe API key, secret, or webhook signing
+        secret hardcoded or logged - these must come from environment
+        variables only; (2) MockPaymentGateway being removed or made
+        unreachable, since the compensation demo depends on it; (3) monetary
+        amounts handled as double or float instead of long minor units or
+        BigDecimal; (4) any currency assumed rather than carried explicitly.
+
+    - path: "payment/src/main/java/com/stampedeio/payment/**"
+      instructions: >
+        Payment outcomes are published back to payments.events wrapped in
+        EventEnvelope, and the booking saga depends on those exact event
+        types. Flag any change to an emitted event type name or payload shape
+        that is not matched by a corresponding change in STAM-booking - this
+        repo cannot verify that itself, so call it out explicitly in the
+        review so the author checks the consumer side. Flag any card number,
+        CVC, full PaymentIntent body, or Authorization header written to
+        logs at any level.
+
+    - path: "payment/src/main/resources/db/migration/*.sql"
+      instructions: >
+        Flyway is forward-only - flag edits to already-merged migrations. Flag
+        any change that drops or weakens the uniqueness of the idempotency key
+        column, which is what prevents double charges.
+
+    - path: "payment/src/test/java/**"
+      instructions: >
+        PaymentCommandConsumerIT, StripePaymentFlowIT and
+        StripeWebhookControllerTest cover the money path. Flag added
+        @Disabled, loosened assertions, or a Testcontainers dependency
+        replaced with a mock. Any new payment behaviour needs a test that
+        fails without the change.
+
+  tools:
+    gitleaks:
+      enabled: true
+    yamllint:
+      enabled: true
+    markdownlint:
+      enabled: true
+    actionlint:
+      enabled: true
+    hadolint:
+      enabled: true
+    semgrep:
+      enabled: true
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  learnings:
+    scope: auto
+  issues:
+    scope: auto
