@@ -10,6 +10,9 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.stampedeio.payment.domain.IdempotencyKey;
 import com.stampedeio.payment.domain.Payment;
 import com.stampedeio.payment.event.EventEnvelope;
@@ -242,8 +245,19 @@ public class PaymentService {
     private record PaymentPayload(long amountCents, String currency, String paymentMethodId,
                                   String pspRef, UUID originalCorrelationId) {
 
+        private static final ObjectMapper MAPPER = new ObjectMapper();
+
         @SuppressWarnings("unchecked")
         static PaymentPayload from(Object payload) {
+            // Booking's outbox ships the payload as a JSON-encoded string inside the
+            // envelope (catalog and notification parse it the same way).
+            if (payload instanceof String json) {
+                try {
+                    payload = MAPPER.readValue(json, new TypeReference<Map<String, Object>>() {});
+                } catch (JsonProcessingException e) {
+                    log.warn("Unparseable payment command payload: {}", e.getOriginalMessage());
+                }
+            }
             long amount = 0L;
             String currency = DEFAULT_CURRENCY;
             String pm = null;
