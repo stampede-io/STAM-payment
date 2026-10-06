@@ -149,6 +149,32 @@ class PaymentServiceTest {
     }
 
     @Test
+    void authorize_jsonStringPayload_asBookingPublishesIt_reachesGatewayWithMethodAndAmount() {
+        UUID cid = UUID.randomUUID();
+        when(idempotencyKeyRepository.findById(cid)).thenReturn(Optional.empty());
+        when(paymentRepository.save(any(Payment.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(paymentGateway.authorize(any(AuthorizeRequest.class)))
+                .thenReturn(AuthorizeResult.authorized("pi_from_string"));
+        when(paymentGateway.name()).thenReturn("mock");
+
+        // Captured verbatim from payments.commands during the STAM-442 live check:
+        // booking's outbox puts the payload on the wire as a JSON-encoded string.
+        String wirePayload = "{\"showId\": \"719c34c8-1893-404f-a474-950df3f742c6\", \"status\": \"HELD\", "
+                + "\"seatIds\": [\"6cfc1eec-9523-437e-957a-98179b15d5cc\"], \"amountCents\": 5000, "
+                + "\"correlationId\": \"" + cid + "\", "
+                + "\"reservationId\": \"5d21a975-6ecc-4676-ab9b-b86d7774fce7\", \"paymentMethodId\": \"pm_card_visa\"}";
+
+        svc().authorizePayment(cid, UUID.randomUUID(), wirePayload);
+
+        ArgumentCaptor<AuthorizeRequest> reqCap = ArgumentCaptor.forClass(AuthorizeRequest.class);
+        verify(paymentGateway).authorize(reqCap.capture());
+        assertThat(reqCap.getValue().paymentMethodId()).isEqualTo("pm_card_visa");
+        assertThat(reqCap.getValue().amountCents()).isEqualTo(5000L);
+        verify(kafkaTemplate).send(eq("payments.events"), any(), eventCaptor.capture());
+        assertThat(((EventEnvelope) eventCaptor.getValue()).eventType()).isEqualTo("PaymentAuthorized");
+    }
+
+    @Test
     void refund_duplicateReplay_returnsProperOutcome_forFailedOriginal() {
         UUID cid = UUID.randomUUID();
         IdempotencyKey existing = new IdempotencyKey(cid, "RefundPayment", "RefundFailed", null);
