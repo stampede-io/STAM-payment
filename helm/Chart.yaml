@@ -1,0 +1,6 @@
+apiVersion: v2
+name: payment
+description: STAMPEDE payment service — Stripe test-mode payment gateway, idempotency keys, saga command consumer
+type: application
+version: 0.0.1-SNAPSHOT
+appVersion: "0.0.1-SNAPSHOT"
