@@ -88,6 +88,9 @@ public class KafkaConfig {
                 new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(consumerFactory);
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.RECORD);
+        // STAM-406: populates MDC correlationId/service from the record's
+        // Kafka headers before the listener method runs.
+        factory.setRecordInterceptor(new KafkaCorrelationIdInterceptor());
         return factory;
     }
 }

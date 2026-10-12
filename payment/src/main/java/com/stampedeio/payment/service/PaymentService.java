@@ -4,6 +4,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -13,6 +14,7 @@ import org.springframework.transaction.annotation.Transactional;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.stampedeio.payment.config.KafkaCorrelationIdInterceptor;
 import com.stampedeio.payment.domain.IdempotencyKey;
 import com.stampedeio.payment.domain.Payment;
 import com.stampedeio.payment.event.EventEnvelope;
@@ -197,7 +199,10 @@ public class PaymentService {
 
     private void emitOutcome(String eventType, UUID correlationId, UUID aggregateId, Object payload) {
         EventEnvelope envelope = EventEnvelope.create(eventType, 1, correlationId, aggregateId, payload);
-        kafkaTemplate.send(TOPIC_PAYMENTS_EVENTS, aggregateId.toString(), envelope);
+        ProducerRecord<String, Object> record =
+                new ProducerRecord<>(TOPIC_PAYMENTS_EVENTS, aggregateId.toString(), envelope);
+        KafkaCorrelationIdInterceptor.addHeader(record, correlationId);
+        kafkaTemplate.send(record);
     }
 
     private static Map<String, Object> authorizeEventPayload(String pspRef, long amountCents, String currency,

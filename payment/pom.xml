@@ -28,6 +28,20 @@
 		<spring-framework.version>7.0.9</spring-framework.version>
 	</properties>
 
+	<dependencyManagement>
+		<dependencies>
+			<!-- Not managed by the Boot BOM; pulled in transitively by kafka-clients
+			     (kafka-clients 4.2.1 depends on the at.yawk.lz4 fork, not org.lz4).
+			     CVE-2026-106451 HIGH (arbitrary code execution via insecure temp
+			     file handling), fixed in 1.11.4. Same pin as STAM-booking's pom. -->
+			<dependency>
+				<groupId>at.yawk.lz4</groupId>
+				<artifactId>lz4-java</artifactId>
+				<version>1.11.4</version>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
+
 	<dependencies>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
@@ -37,6 +51,15 @@
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
+
+		<!-- STAM-67 / AC1 (traceId): no exporter configured yet, that is
+		     STAM-68's job (OTel tracing across HTTP + Kafka). This alone gets
+		     Boot's BraveAutoConfiguration to generate a span per request and
+		     its MDCScopeDecorator to put traceId/spanId into every log line. -->
+		<dependency>
+			<groupId>io.micrometer</groupId>
+			<artifactId>micrometer-tracing-bridge-brave</artifactId>
 		</dependency>
 
 		<dependency>
