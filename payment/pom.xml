@@ -16,20 +16,28 @@
 
 	<properties>
 		<java.version>21</java.version>
-		<spring-cloud.version>2025.1.2</spring-cloud.version>
 		<httpcore5.version>5.4.3</httpcore5.version>
+		<!-- Jackson CVE-2026-89407, -89425, -68497, -91776, -91777 (HIGH). Remove once the Boot BOM is at or above these. -->
+		<jackson-2-bom.version>2.21.7</jackson-2-bom.version>
+		<jackson-bom.version>3.1.7</jackson-bom.version>
+		<!-- Tomcat CVE-2026-65182/-65905/-68525 CRITICAL. Remove once the Boot BOM is at or above this. -->
+		<tomcat.version>11.0.25</tomcat.version>
 		<postgresql.version>42.7.12</postgresql.version>
 		<stripe-java.version>28.4.0</stripe-java.version>
+		<!-- Spring Framework CVE-2026-47884 CRITICAL. Remove once the Boot BOM is at or above this. -->
+		<spring-framework.version>7.0.9</spring-framework.version>
 	</properties>
 
 	<dependencyManagement>
 		<dependencies>
+			<!-- Not managed by the Boot BOM; pulled in transitively by kafka-clients
+			     (kafka-clients 4.2.1 depends on the at.yawk.lz4 fork, not org.lz4).
+			     CVE-2026-106451 HIGH (arbitrary code execution via insecure temp
+			     file handling), fixed in 1.11.4. Same pin as STAM-booking's pom. -->
 			<dependency>
-				<groupId>org.springframework.cloud</groupId>
-				<artifactId>spring-cloud-dependencies</artifactId>
-				<version>${spring-cloud.version}</version>
-				<type>pom</type>
-				<scope>import</scope>
+				<groupId>at.yawk.lz4</groupId>
+				<artifactId>lz4-java</artifactId>
+				<version>1.11.4</version>
 			</dependency>
 		</dependencies>
 	</dependencyManagement>
@@ -43,6 +51,20 @@
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
+
+		<!-- STAM-67 / AC1 (traceId): no exporter configured yet, that is
+		     STAM-68's job (OTel tracing across HTTP + Kafka). This alone gets
+		     Boot's BraveAutoConfiguration to generate a span per request and
+		     its MDCScopeDecorator to put traceId/spanId into every log line. -->
+		<dependency>
+			<groupId>io.micrometer</groupId>
+			<artifactId>micrometer-tracing-bridge-otel</artifactId>
+		</dependency>
+
+		<dependency>
+			<groupId>io.micrometer</groupId>
+			<artifactId>micrometer-registry-prometheus</artifactId>
 		</dependency>
 
 		<dependency>
@@ -91,16 +113,6 @@
 			<groupId>net.logstash.logback</groupId>
 			<artifactId>logstash-logback-encoder</artifactId>
 			<version>8.0</version>
-		</dependency>
-
-		<dependency>
-			<groupId>org.springframework.cloud</groupId>
-			<artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
-		</dependency>
-
-		<dependency>
-			<groupId>org.springframework.cloud</groupId>
-			<artifactId>spring-cloud-starter-config</artifactId>
 		</dependency>
 
 		<dependency>

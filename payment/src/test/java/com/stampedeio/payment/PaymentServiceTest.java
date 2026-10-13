@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -48,7 +49,7 @@ class PaymentServiceTest {
     private KafkaTemplate<String, Object> kafkaTemplate;
 
     @Captor
-    private ArgumentCaptor<Object> eventCaptor;
+    private ArgumentCaptor<ProducerRecord<String, Object>> recordCaptor;
 
     private static Map<String, Object> payload() {
         return Map.of("amountCents", 9999L, "currency", "USD", "paymentMethodId", "pm_card_visa");
@@ -78,8 +79,8 @@ class PaymentServiceTest {
         assertThat(persisted.getCurrency()).isEqualTo("USD");
         assertThat(persisted.getStatus()).isEqualTo("AUTHORIZED");
 
-        verify(kafkaTemplate).send(eq("payments.events"), any(), eventCaptor.capture());
-        EventEnvelope env = (EventEnvelope) eventCaptor.getValue();
+        verify(kafkaTemplate).send(recordCaptor.capture());
+        EventEnvelope env = (EventEnvelope) recordCaptor.getValue().value();
         assertThat(env.eventType()).isEqualTo("PaymentAuthorized");
     }
 
@@ -94,8 +95,8 @@ class PaymentServiceTest {
 
         svc().authorizePayment(cid, UUID.randomUUID(), payload());
 
-        verify(kafkaTemplate).send(eq("payments.events"), any(), eventCaptor.capture());
-        EventEnvelope env = (EventEnvelope) eventCaptor.getValue();
+        verify(kafkaTemplate).send(recordCaptor.capture());
+        EventEnvelope env = (EventEnvelope) recordCaptor.getValue().value();
         assertThat(env.eventType()).isEqualTo("PaymentFailed");
     }
 
@@ -127,8 +128,8 @@ class PaymentServiceTest {
 
         verify(paymentGateway, never()).authorize(any());
         verify(idempotencyKeyRepository, never()).save(any());
-        verify(kafkaTemplate).send(eq("payments.events"), any(), eventCaptor.capture());
-        assertThat(((EventEnvelope) eventCaptor.getValue()).eventType()).isEqualTo("PaymentAuthorized");
+        verify(kafkaTemplate).send(recordCaptor.capture());
+        assertThat(((EventEnvelope) recordCaptor.getValue().value()).eventType()).isEqualTo("PaymentAuthorized");
     }
 
     @Test
@@ -144,8 +145,34 @@ class PaymentServiceTest {
         assertThat(result.status()).isEqualTo(com.stampedeio.payment.gateway.ChargeStatus.FAILED);
         assertThat(result.failureReason()).isEqualTo("missing_payment_method");
         verify(paymentGateway, never()).authorize(any());
-        verify(kafkaTemplate).send(eq("payments.events"), any(), eventCaptor.capture());
-        assertThat(((EventEnvelope) eventCaptor.getValue()).eventType()).isEqualTo("PaymentFailed");
+        verify(kafkaTemplate).send(recordCaptor.capture());
+        assertThat(((EventEnvelope) recordCaptor.getValue().value()).eventType()).isEqualTo("PaymentFailed");
+    }
+
+    @Test
+    void authorize_jsonStringPayload_asBookingPublishesIt_reachesGatewayWithMethodAndAmount() {
+        UUID cid = UUID.randomUUID();
+        when(idempotencyKeyRepository.findById(cid)).thenReturn(Optional.empty());
+        when(paymentRepository.save(any(Payment.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(paymentGateway.authorize(any(AuthorizeRequest.class)))
+                .thenReturn(AuthorizeResult.authorized("pi_from_string"));
+        when(paymentGateway.name()).thenReturn("mock");
+
+        // Captured verbatim from payments.commands during the STAM-442 live check:
+        // booking's outbox puts the payload on the wire as a JSON-encoded string.
+        String wirePayload = "{\"showId\": \"719c34c8-1893-404f-a474-950df3f742c6\", \"status\": \"HELD\", "
+                + "\"seatIds\": [\"6cfc1eec-9523-437e-957a-98179b15d5cc\"], \"amountCents\": 5000, "
+                + "\"correlationId\": \"" + cid + "\", "
+                + "\"reservationId\": \"5d21a975-6ecc-4676-ab9b-b86d7774fce7\", \"paymentMethodId\": \"pm_card_visa\"}";
+
+        svc().authorizePayment(cid, UUID.randomUUID(), wirePayload);
+
+        ArgumentCaptor<AuthorizeRequest> reqCap = ArgumentCaptor.forClass(AuthorizeRequest.class);
+        verify(paymentGateway).authorize(reqCap.capture());
+        assertThat(reqCap.getValue().paymentMethodId()).isEqualTo("pm_card_visa");
+        assertThat(reqCap.getValue().amountCents()).isEqualTo(5000L);
+        verify(kafkaTemplate).send(recordCaptor.capture());
+        assertThat(((EventEnvelope) recordCaptor.getValue().value()).eventType()).isEqualTo("PaymentAuthorized");
     }
 
     @Test
@@ -186,8 +213,9 @@ class PaymentServiceTest {
 
         svc().applyWebhookOutcome("pi_wh", true, null);
 
-        verify(kafkaTemplate).send(eq("payments.events"), eq(aggregateId.toString()), eventCaptor.capture());
-        EventEnvelope env = (EventEnvelope) eventCaptor.getValue();
+        verify(kafkaTemplate).send(recordCaptor.capture());
+        assertThat(recordCaptor.getValue().key()).isEqualTo(aggregateId.toString());
+        EventEnvelope env = (EventEnvelope) recordCaptor.getValue().value();
         assertThat(env.aggregateId()).isEqualTo(aggregateId);
         assertThat(env.correlationId()).isEqualTo(cid);
         assertThat(env.eventType()).isEqualTo("PaymentAuthorized");
@@ -204,8 +232,8 @@ class PaymentServiceTest {
         svc().refundPayment(cid, UUID.randomUUID(),
                 Map.of("pspRef", "pi_test_123", "amountCents", 500L));
 
-        verify(kafkaTemplate).send(eq("payments.events"), any(), eventCaptor.capture());
-        assertThat(((EventEnvelope) eventCaptor.getValue()).eventType()).isEqualTo("RefundIssued");
+        verify(kafkaTemplate).send(recordCaptor.capture());
+        assertThat(((EventEnvelope) recordCaptor.getValue().value()).eventType()).isEqualTo("RefundIssued");
     }
 
     @Test
@@ -254,8 +282,8 @@ class PaymentServiceTest {
         svc().refundPayment(cid, UUID.randomUUID(),
                 Map.of("pspRef", "pi_test_123", "amountCents", 500L));
 
-        verify(kafkaTemplate).send(eq("payments.events"), any(), eventCaptor.capture());
-        assertThat(((EventEnvelope) eventCaptor.getValue()).eventType()).isEqualTo("RefundFailed");
+        verify(kafkaTemplate).send(recordCaptor.capture());
+        assertThat(((EventEnvelope) recordCaptor.getValue().value()).eventType()).isEqualTo("RefundFailed");
     }
 
     @Test
@@ -266,7 +294,7 @@ class PaymentServiceTest {
         when(paymentRepository.findByPspRef("pi_web")).thenReturn(Optional.of(p));
 
         svc().applyWebhookOutcome("pi_web", true, null);
-        verify(kafkaTemplate, never()).send(eq("payments.events"), any(), any());
+        verify(kafkaTemplate, never()).send(any(ProducerRecord.class));
     }
 
     @Test
@@ -280,8 +308,8 @@ class PaymentServiceTest {
         svc().applyWebhookOutcome("pi_web2", true, null);
 
         assertThat(p.getStatus()).isEqualTo("AUTHORIZED");
-        verify(kafkaTemplate, times(1)).send(eq("payments.events"), any(), eventCaptor.capture());
-        assertThat(((EventEnvelope) eventCaptor.getValue()).eventType()).isEqualTo("PaymentAuthorized");
+        verify(kafkaTemplate, times(1)).send(recordCaptor.capture());
+        assertThat(((EventEnvelope) recordCaptor.getValue().value()).eventType()).isEqualTo("PaymentAuthorized");
     }
 
     private static Payment paymentAuthorized(UUID cid, String pspRef, long amount, String currency) {
