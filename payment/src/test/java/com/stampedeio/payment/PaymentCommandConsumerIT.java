@@ -132,6 +132,31 @@ class PaymentCommandConsumerIT {
         });
     }
 
+    @Test
+    void stam452_nonJsonCommand_isSkipped_andTheNextCommandIsStillProcessed() throws Exception {
+        // STAM-452: bytes that aren't JSON fail in the deserializer, before
+        // the listener. Without ErrorHandlingDeserializer the container
+        // re-polls that offset forever and every command behind it is stuck.
+        UUID correlationId = UUID.randomUUID();
+        UUID aggregateId = UUID.randomUUID();
+        try (var raw = new org.apache.kafka.clients.producer.KafkaProducer<String, byte[]>(Map.of(
+                org.apache.kafka.clients.producer.ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, kafka.getBootstrapServers(),
+                org.apache.kafka.clients.producer.ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
+                        org.apache.kafka.common.serialization.StringSerializer.class,
+                org.apache.kafka.clients.producer.ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG,
+                        org.apache.kafka.common.serialization.ByteArraySerializer.class))) {
+            raw.send(new org.apache.kafka.clients.producer.ProducerRecord<>("payments.commands",
+                    aggregateId.toString(), "not-json-at-all".getBytes(java.nio.charset.StandardCharsets.UTF_8))).get();
+        }
+        // Same key, so this command sits behind the poison on one partition.
+        sendCommand("AuthorizePayment", correlationId, aggregateId);
+
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
+                assertThat(receivedEvents).anyMatch(e ->
+                        "PaymentAuthorized".equals(e.get("eventType"))
+                                && correlationId.toString().equals(e.get("correlationId"))));
+    }
+
     private void sendCommand(String commandType, UUID correlationId, UUID aggregateId) throws Exception {
         Map<String, Object> command = new HashMap<>();
         command.put("eventId", UUID.randomUUID().toString());
